@@ -27,6 +27,10 @@ class NearbyService {
   /// 現在接続中のエンドポイントID一覧
   final List<String> _connectedEndpointIds = [];
 
+  /// エンドポイントID → 表示名 のマッピング
+  /// onConnectionInitiated で名前を保存し、切断時に参照する
+  final Map<String, String> _endpointNames = {};
+
   // ---------- コールバック（UI側でセットする） ----------
 
   /// 発見側：端末が見つかった
@@ -69,14 +73,18 @@ class NearbyService {
     return await Nearby().startAdvertising(
       displayName,
       Strategy.P2P_CLUSTER,
-      onConnectionInitiated: (id, info) =>
-          onConnectionInitiated?.call(id, info),
+      onConnectionInitiated: (id, info) {
+        _endpointNames[id] = info.endpointName;
+        onConnectionInitiated?.call(id, info);
+      },
       onConnectionResult: (id, status) {
         _onConnectionResult(id, status);
         onConnectionResult?.call(id, status);
       },
       onDisconnected: (id) {
         _connectedEndpointIds.remove(id);
+        final name = _endpointNames.remove(id) ?? '不明な端末';
+        _addSystemMessage('$name が退出しました');
         onDisconnected?.call(id);
       },
       serviceId: serviceId,
@@ -113,14 +121,18 @@ class NearbyService {
     return await Nearby().requestConnection(
       displayName,
       endpointId,
-      onConnectionInitiated: (id, info) =>
-          onConnectionInitiated?.call(id, info),
+      onConnectionInitiated: (id, info) {
+        _endpointNames[id] = info.endpointName;
+        onConnectionInitiated?.call(id, info);
+      },
       onConnectionResult: (id, status) {
         _onConnectionResult(id, status);
         onConnectionResult?.call(id, status);
       },
       onDisconnected: (id) {
         _connectedEndpointIds.remove(id);
+        final name = _endpointNames.remove(id) ?? '不明な端末';
+        _addSystemMessage('$name が退出しました');
         onDisconnected?.call(id);
       },
     );
@@ -194,6 +206,8 @@ class NearbyService {
   void _onConnectionResult(String endpointId, Status status) {
     if (status == Status.CONNECTED) {
       _connectedEndpointIds.add(endpointId);
+      final name = _endpointNames[endpointId] ?? '不明な端末';
+      _addSystemMessage('$name が入室しました');
     }
   }
 
@@ -228,6 +242,19 @@ class NearbyService {
   }
 
   // ---------- ヘルパー ----------
+
+  /// システムメッセージを chatMessages に追加する
+  ///
+  /// type='system' フラグにより、UI側で吹き出し表示ではなく
+  /// 中央揃えの控えめなテキストとして描画される。
+  void _addSystemMessage(String text) {
+    chatMessages.add({
+      'type': 'system',
+      'text': text,
+      'time': _formatTime(DateTime.now()),
+    });
+    onChatMessagesUpdated?.call();
+  }
 
   /// DateTime を "HH:mm" 形式の文字列に変換する
   String _formatTime(DateTime dt) {

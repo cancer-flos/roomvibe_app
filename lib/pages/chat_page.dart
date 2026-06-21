@@ -91,9 +91,18 @@ class _ChatPageState extends State<ChatPage> {
                     itemCount: widget.nearby.chatMessages.length,
                     itemBuilder: (_, i) {
                       final msg = widget.nearby.chatMessages[i];
-                      final sender = msg['sender'] ?? '不明';
+                      final type = msg['type'] ?? 'message';
                       final text = msg['text'] ?? '';
                       final time = msg['time'] ?? '';
+
+                      // type フィールドで分岐：
+                      // 'system' → システム通知（中央揃えグレーテキスト）
+                      // それ以外 → 通常のチャット吹き出し
+                      if (type == 'system') {
+                        return _SystemMessage(text: text, time: time);
+                      }
+
+                      final sender = msg['sender'] ?? '不明';
                       final isMe = sender == widget.nearby.myDisplayName;
 
                       return _MessageBubble(
@@ -151,6 +160,59 @@ class _ChatPageState extends State<ChatPage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// システムメッセージ（入退室等）のウィジェット
+///
+/// 中央寄せの控えめなグレーテキストで表示する。
+/// LINE の「〇〇さんが参加しました」のような演出。
+class _SystemMessage extends StatelessWidget {
+  final String text;
+  final String time;
+
+  const _SystemMessage({
+    required this.text,
+    required this.time,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.grey[200],
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  text,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey[700],
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                time,
+                style: TextStyle(
+                  fontSize: 9,
+                  color: Colors.grey[500],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
