@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 
 /// Nearby Connections API をラップするサービスクラス。
@@ -6,6 +10,22 @@ import 'package:nearby_connections/nearby_connections.dart';
 /// UI 側はこのクラスのメソッドを呼ぶだけで操作できる。
 class NearbyService {
   static const String serviceId = "com.example.roomvibe.p2p";
+
+  // ---------- チャットメッセージ ----------
+
+  /// 送信者名とテキストのペアのリスト
+  final List<Map<String, String>> chatMessages = [];
+
+  /// メッセージ一覧が更新されたときにUIへ通知するコールバック
+  VoidCallback? onChatMessagesUpdated;
+
+  // ---------- 内部状態 ----------
+
+  /// 自身の表示名
+  String? _myDisplayName;
+
+  /// 現在接続中のエンドポイントID一覧
+  final List<String> _connectedEndpointIds = [];
 
   // ---------- コールバック（UI側でセットする） ----------
 
@@ -32,6 +52,16 @@ class NearbyService {
   void Function(String endpointId, PayloadTransferUpdate update)?
       onPayloadTransferUpdate;
 
+  // ---------- 表示名 ----------
+
+  /// 自身の表示名
+  String? get myDisplayName => _myDisplayName;
+
+  /// 自身の表示名を設定する（チャット送信時のsender名として使用）
+  void setDisplayName(String name) {
+    _myDisplayName = name;
+  }
+
   // ---------- 公開メソッド ----------
 
   /// Advertise（部屋を作る）を開始する
@@ -41,9 +71,14 @@ class NearbyService {
       Strategy.P2P_CLUSTER,
       onConnectionInitiated: (id, info) =>
           onConnectionInitiated?.call(id, info),
-      onConnectionResult: (id, status) =>
-          onConnectionResult?.call(id, status),
-      onDisconnected: (id) => onDisconnected?.call(id),
+      onConnectionResult: (id, status) {
+        _onConnectionResult(id, status);
+        onConnectionResult?.call(id, status);
+      },
+      onDisconnected: (id) {
+        _connectedEndpointIds.remove(id);
+        onDisconnected?.call(id);
+      },
       serviceId: serviceId,
     );
   }
@@ -80,9 +115,14 @@ class NearbyService {
       endpointId,
       onConnectionInitiated: (id, info) =>
           onConnectionInitiated?.call(id, info),
-      onConnectionResult: (id, status) =>
-          onConnectionResult?.call(id, status),
-      onDisconnected: (id) => onDisconnected?.call(id),
+      onConnectionResult: (id, status) {
+        _onConnectionResult(id, status);
+        onConnectionResult?.call(id, status);
+      },
+      onDisconnected: (id) {
+        _connectedEndpointIds.remove(id);
+        onDisconnected?.call(id);
+      },
     );
   }
 
@@ -91,7 +131,7 @@ class NearbyService {
     return await Nearby().acceptConnection(
       endpointId,
       onPayLoadRecieved: (id, payload) =>
-          onPayloadReceived?.call(id, payload),
+          _handlePayloadReceived(id, payload),
       onPayloadTransferUpdate: (id, update) =>
           onPayloadTransferUpdate?.call(id, update),
     );
@@ -104,11 +144,95 @@ class NearbyService {
 
   /// 特定のエンドポイントから切断する
   Future<void> disconnectFromEndpoint(String endpointId) async {
+    _connectedEndpointIds.remove(endpointId);
     await Nearby().disconnectFromEndpoint(endpointId);
   }
 
   /// すべてのエンドポイントを切断する
   Future<void> stopAllEndpoints() async {
+    _connectedEndpointIds.clear();
     await Nearby().stopAllEndpoints();
+  }
+
+  /// メッセージを接続中の全端末に送信する
+  ///
+  /// 1. テキストを {"sender": "端末名", "text": "本文", "time": "HH:mm"} のJSONに変換
+  /// 2. UTF-8エンコードでUint8Listに変換
+  /// 3. 接続中の全エンドポイントに sendBytesPayload で一斉送信
+  /// 4. 自分自身には送られないため、ローカルにもメッセージを追加
+  void sendMessage(String text) {
+    if (_myDisplayName == null) return;
+    if (text.trim().isEmpty) return;
+
+    final now = _formatTime(DateTime.now());
+
+    // シリアライズ: String → JSON → UTF-8 → Uint8List
+    final jsonStr = jsonEncode({
+      'sender': _myDisplayName,
+      'text': text,
+      'time': now,
+    });
+    final bytes = Uint8List.fromList(utf8.encode(jsonStr));
+
+    // 接続中の全端末にブロードキャスト
+    for (final endpointId in _connectedEndpointIds) {
+      Nearby().sendBytesPayload(endpointId, bytes);
+    }
+
+    // ローカルエコー: 自分の発言を自分にも表示する
+    chatMessages.add({
+      'sender': _myDisplayName!,
+      'text': text,
+      'time': now,
+    });
+    onChatMessagesUpdated?.call();
+  }
+
+  // ---------- 内部処理 ----------
+
+  /// 接続結果を内部トラッキングする
+  void _onConnectionResult(String endpointId, Status status) {
+    if (status == Status.CONNECTED) {
+      _connectedEndpointIds.add(endpointId);
+    }
+  }
+
+  /// ペイロード受信を処理する
+  ///
+  /// BYTES タイプのペイロードを
+  ///   Uint8List → UTF-8デコード → JSONパース → メッセージ保存
+  /// の順でデシリアライズする。
+  void _handlePayloadReceived(String endpointId, Payload payload) {
+    if (payload.type == PayloadType.BYTES && payload.bytes != null) {
+      // デシリアライズ: Uint8List → UTF-8 → JSON → Map
+      try {
+        final jsonStr = utf8.decode(payload.bytes!);
+        final data = jsonDecode(jsonStr) as Map<String, dynamic>;
+        final sender = data['sender'] as String? ?? '不明';
+        final text = data['text'] as String? ?? '';
+        final time = data['time'] as String? ?? _formatTime(DateTime.now());
+
+        chatMessages.add({
+          'sender': sender,
+          'text': text,
+          'time': time,
+        });
+        onChatMessagesUpdated?.call();
+      } catch (e) {
+        debugPrint("メッセージデコードエラー: $e");
+      }
+    }
+
+    // 外部から設定されたコールバックにも転送
+    onPayloadReceived?.call(endpointId, payload);
+  }
+
+  // ---------- ヘルパー ----------
+
+  /// DateTime を "HH:mm" 形式の文字列に変換する
+  String _formatTime(DateTime dt) {
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    return '$h:$m';
   }
 }

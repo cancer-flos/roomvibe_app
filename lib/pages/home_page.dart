@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:nearby_connections/nearby_connections.dart';
+import 'package:roomvibe_app/pages/chat_page.dart';
 import 'package:roomvibe_app/services/nearby_service.dart';
 
 /// メイン画面。
@@ -31,6 +32,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    _nearby.setDisplayName(_displayName);
     _setupCallbacks();
     _requestPermissions();
   }
@@ -253,7 +255,28 @@ class _HomePageState extends State<HomePage> {
                       subtitle: Text("ID: ${e.key}"),
                     ),
                   )),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
+              Center(
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ChatPage(nearby: _nearby),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.chat),
+                  label: const Text("チャットルームを開く"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.indigo[100],
+                    foregroundColor: Colors.indigo[900],
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
               const Divider(),
               const SizedBox(height: 8),
             ],
