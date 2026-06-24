@@ -103,7 +103,10 @@ class _ChatPageState extends State<ChatPage> {
                       }
 
                       final sender = msg['sender'] ?? '不明';
-                      final isMe = sender == widget.nearby.myDisplayName;
+                      // isMe フラグで自分のメッセージを判定する（名前比較ではない）
+                      // 送信元で isMe='true' がセットされており、
+                      // 受信したメッセージには isMe キーが存在しない（=null）ため false になる
+                      final isMe = msg['isMe'] == 'true';
 
                       return _MessageBubble(
                         sender: sender,

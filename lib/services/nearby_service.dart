@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:nearby_connections/nearby_connections.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Nearby Connections API をラップするサービスクラス。
 ///
@@ -10,6 +11,9 @@ import 'package:nearby_connections/nearby_connections.dart';
 /// UI 側はこのクラスのメソッドを呼ぶだけで操作できる。
 class NearbyService {
   static const String serviceId = "com.example.roomvibe.p2p";
+
+  /// SharedPreferences にVIP名簿を保存するキー
+  static const String _vipPrefKey = "vip_device_names";
 
   // ---------- チャットメッセージ ----------
 
@@ -24,12 +28,33 @@ class NearbyService {
   /// 自身の表示名
   String? _myDisplayName;
 
+  /// 最後に Advertise / Discover に使った表示名（自動リカバリ用）
+  String? _lastDisplayName;
+
+  /// 自身が Host（Advertise中）か Guest（Discover中）かを示すフラグ
+  ///
+  /// 切断時の自動リカバリ（再接続待機状態への復帰）の際に、
+  /// どちらのロールで再開すべきかを判断するために使用する。
+  bool isHost = false;
+
   /// 現在接続中のエンドポイントID一覧
   final List<String> _connectedEndpointIds = [];
 
   /// エンドポイントID → 表示名 のマッピング
   /// onConnectionInitiated で名前を保存し、切断時に参照する
   final Map<String, String> _endpointNames = {};
+
+  /// 過去に接続が成功した相手の表示名の集合。
+  ///
+  /// この内容は SharedPreferences に永続化されており、
+  /// アプリ再起動後も自動再接続が機能する。
+  /// 切断後に同じ相手が再発見された場合、この Set に名前が含まれていると
+  /// UI操作を一切介さずに自動的に requestConnection / acceptConnection を実行する。
+  final Set<String> _knownDeviceNames = {};
+
+  /// VIP名簿を一度でも SharedPreferences から読み込んだかを示すフラグ。
+  /// startAdvertising / startDiscovery の重複読み込みを防ぐ。
+  bool _vipNamesLoaded = false;
 
   // ---------- コールバック（UI側でセットする） ----------
 
@@ -66,25 +91,45 @@ class NearbyService {
     _myDisplayName = name;
   }
 
+  // ---------- VIP名簿の永続化 ----------
+
+  /// SharedPreferences からVIP名簿を読み込み、_knownDeviceNames に復元する。
+  /// 初回のみ実行される（_vipNamesLoaded でガード）。
+  Future<void> _loadVipNames() async {
+    if (_vipNamesLoaded) return;
+    _vipNamesLoaded = true;
+
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getStringList(_vipPrefKey);
+    if (saved != null) {
+      _knownDeviceNames.addAll(saved);
+    }
+  }
+
+  /// _knownDeviceNames の内容を SharedPreferences に保存する。
+  /// Set → List に変換してから書き込む。
+  Future<void> _saveVipNames() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_vipPrefKey, _knownDeviceNames.toList());
+  }
+
   // ---------- 公開メソッド ----------
 
   /// Advertise（部屋を作る）を開始する
   Future<bool> startAdvertising(String displayName) async {
+    isHost = true;
+    _lastDisplayName = displayName;
+    await _loadVipNames();
     return await Nearby().startAdvertising(
       displayName,
       Strategy.P2P_CLUSTER,
-      onConnectionInitiated: (id, info) {
-        _endpointNames[id] = info.endpointName;
-        onConnectionInitiated?.call(id, info);
-      },
+      onConnectionInitiated: _onAdvertConnectionInitiated,
       onConnectionResult: (id, status) {
         _onConnectionResult(id, status);
         onConnectionResult?.call(id, status);
       },
       onDisconnected: (id) {
-        _connectedEndpointIds.remove(id);
-        final name = _endpointNames.remove(id) ?? '不明な端末';
-        _addSystemMessage('$name が退出しました');
+        _handleDisconnect(id);
         onDisconnected?.call(id);
       },
       serviceId: serviceId,
@@ -98,11 +143,13 @@ class NearbyService {
 
   /// Discover（部屋を探す）を開始する
   Future<bool> startDiscovery(String displayName) async {
+    isHost = false;
+    _lastDisplayName = displayName;
+    await _loadVipNames();
     return await Nearby().startDiscovery(
       displayName,
       Strategy.P2P_CLUSTER,
-      onEndpointFound: (id, name, sid) =>
-          onEndpointFound?.call(id, name),
+      onEndpointFound: _onDiscoverEndpointFound,
       onEndpointLost: (id) => onEndpointLost?.call(id),
       serviceId: serviceId,
     );
@@ -130,9 +177,7 @@ class NearbyService {
         onConnectionResult?.call(id, status);
       },
       onDisconnected: (id) {
-        _connectedEndpointIds.remove(id);
-        final name = _endpointNames.remove(id) ?? '不明な端末';
-        _addSystemMessage('$name が退出しました');
+        _handleDisconnect(id);
         onDisconnected?.call(id);
       },
     );
@@ -178,7 +223,6 @@ class NearbyService {
 
     final now = _formatTime(DateTime.now());
 
-    // シリアライズ: String → JSON → UTF-8 → Uint8List
     final jsonStr = jsonEncode({
       'sender': _myDisplayName,
       'text': text,
@@ -186,18 +230,79 @@ class NearbyService {
     });
     final bytes = Uint8List.fromList(utf8.encode(jsonStr));
 
-    // 接続中の全端末にブロードキャスト
     for (final endpointId in _connectedEndpointIds) {
       Nearby().sendBytesPayload(endpointId, bytes);
     }
 
-    // ローカルエコー: 自分の発言を自分にも表示する
     chatMessages.add({
       'sender': _myDisplayName!,
       'text': text,
       'time': now,
+      'isMe': 'true',
     });
     onChatMessagesUpdated?.call();
+  }
+
+  // ---------- 内部処理：コールバック ----------
+
+  /// Advertise側: 接続リクエストを受信した時の共通処理。
+  ///
+  /// VIPリストに含まれる端末 → 自動accept（UIコールバック呼ばず）
+  /// 未知の端末            → UIコールバック（ダイアログ表示用）
+  void _onAdvertConnectionInitiated(String id, ConnectionInfo info) {
+    _endpointNames[id] = info.endpointName;
+
+    if (_knownDeviceNames.contains(info.endpointName)) {
+      Nearby().acceptConnection(
+        id,
+        onPayLoadRecieved: (eid, payload) =>
+            _handlePayloadReceived(eid, payload),
+        onPayloadTransferUpdate: (eid, update) =>
+            onPayloadTransferUpdate?.call(eid, update),
+      );
+      return;
+    }
+
+    onConnectionInitiated?.call(id, info);
+  }
+
+  /// Discover側: 端末を発見した時の共通処理。
+  ///
+  /// VIPリストに含まれる端末 → 自動 requestConnection + accept（UIコールバック呼ばず）
+  /// 未知の端末            → UIコールバック（リスト表示用）
+  void _onDiscoverEndpointFound(String id, String name, String sid) {
+    if (_knownDeviceNames.contains(name)) {
+      final displayName = _lastDisplayName;
+      if (displayName == null) return;
+
+      Nearby().requestConnection(
+        displayName,
+        id,
+        onConnectionInitiated: (cid, info) {
+          _endpointNames[cid] = info.endpointName;
+          if (_knownDeviceNames.contains(info.endpointName)) {
+            Nearby().acceptConnection(
+              cid,
+              onPayLoadRecieved: (eid, payload) =>
+                  _handlePayloadReceived(eid, payload),
+              onPayloadTransferUpdate: (eid, update) =>
+                  onPayloadTransferUpdate?.call(eid, update),
+            );
+          }
+        },
+        onConnectionResult: (cid, status) {
+          _onConnectionResult(cid, status);
+          onConnectionResult?.call(cid, status);
+        },
+        onDisconnected: (cid) {
+          _handleDisconnect(cid);
+          onDisconnected?.call(cid);
+        },
+      );
+      return;
+    }
+
+    onEndpointFound?.call(id, name);
   }
 
   // ---------- 内部処理 ----------
@@ -207,18 +312,60 @@ class NearbyService {
     if (status == Status.CONNECTED) {
       _connectedEndpointIds.add(endpointId);
       final name = _endpointNames[endpointId] ?? '不明な端末';
+      // 接続成功 → この相手をVIPとして記憶し、ストレージに永続化
+      if (name != '不明な端末') {
+        _knownDeviceNames.add(name);
+        _saveVipNames(); // ← SharedPreferences に保存
+      }
       _addSystemMessage('$name が入室しました');
     }
   }
 
-  /// ペイロード受信を処理する
+  /// 切断を処理し、自動リカバリを試行する。
   ///
-  /// BYTES タイプのペイロードを
-  ///   Uint8List → UTF-8デコード → JSONパース → メッセージ保存
-  /// の順でデシリアライズする。
+  /// 1. 内部リストから該当エンドポイントの情報を削除
+  /// 2. システムメッセージを追加
+  /// 3. 接続中の端末が0台になった場合、自分のロール（Host/Guest）に応じて
+  ///    Advertise または Discover を自動再開し、新たな接続を待機する状態に復帰する。
+  void _handleDisconnect(String endpointId) {
+    _connectedEndpointIds.remove(endpointId);
+    final name = _endpointNames.remove(endpointId) ?? '不明な端末';
+    _addSystemMessage('$name が退出しました');
+
+    if (_connectedEndpointIds.isNotEmpty) return;
+
+    final displayName = _lastDisplayName;
+    if (displayName == null) return;
+
+    if (isHost) {
+      Nearby().startAdvertising(
+        displayName,
+        Strategy.P2P_CLUSTER,
+        onConnectionInitiated: _onAdvertConnectionInitiated,
+        onConnectionResult: (id, status) {
+          _onConnectionResult(id, status);
+          onConnectionResult?.call(id, status);
+        },
+        onDisconnected: (id) {
+          _handleDisconnect(id);
+          onDisconnected?.call(id);
+        },
+        serviceId: serviceId,
+      );
+    } else {
+      Nearby().startDiscovery(
+        displayName,
+        Strategy.P2P_CLUSTER,
+        onEndpointFound: _onDiscoverEndpointFound,
+        onEndpointLost: (id) => onEndpointLost?.call(id),
+        serviceId: serviceId,
+      );
+    }
+  }
+
+  /// ペイロード受信を処理する
   void _handlePayloadReceived(String endpointId, Payload payload) {
     if (payload.type == PayloadType.BYTES && payload.bytes != null) {
-      // デシリアライズ: Uint8List → UTF-8 → JSON → Map
       try {
         final jsonStr = utf8.decode(payload.bytes!);
         final data = jsonDecode(jsonStr) as Map<String, dynamic>;
@@ -237,16 +384,11 @@ class NearbyService {
       }
     }
 
-    // 外部から設定されたコールバックにも転送
     onPayloadReceived?.call(endpointId, payload);
   }
 
   // ---------- ヘルパー ----------
 
-  /// システムメッセージを chatMessages に追加する
-  ///
-  /// type='system' フラグにより、UI側で吹き出し表示ではなく
-  /// 中央揃えの控えめなテキストとして描画される。
   void _addSystemMessage(String text) {
     chatMessages.add({
       'type': 'system',
@@ -256,7 +398,6 @@ class NearbyService {
     onChatMessagesUpdated?.call();
   }
 
-  /// DateTime を "HH:mm" 形式の文字列に変換する
   String _formatTime(DateTime dt) {
     final h = dt.hour.toString().padLeft(2, '0');
     final m = dt.minute.toString().padLeft(2, '0');

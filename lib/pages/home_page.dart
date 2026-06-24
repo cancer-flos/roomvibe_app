@@ -3,6 +3,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:nearby_connections/nearby_connections.dart';
 import 'package:roomvibe_app/pages/chat_page.dart';
 import 'package:roomvibe_app/services/nearby_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// メイン画面。
 ///
@@ -18,7 +19,8 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final NearbyService _nearby = NearbyService();
 
-  final String _displayName = "RoomVibe端末";
+  /// 自身の表示名（SharedPreferences から読み込む）
+  String _displayName = "";
 
   // 発見した端末一覧  key: endpointId, value: endpointName
   final Map<String, String> _foundDevices = {};
@@ -32,9 +34,73 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    _nearby.setDisplayName(_displayName);
     _setupCallbacks();
     _requestPermissions();
+    // SharedPreferences から名前を読み込み、未設定ならダイアログを表示
+    _loadDisplayName();
+  }
+
+  /// SharedPreferences から表示名を読み込む。
+  /// 未設定（null または空文字）の場合は名前入力ダイアログを表示する。
+  Future<void> _loadDisplayName() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedName = prefs.getString('displayName') ?? '';
+
+    if (savedName.isNotEmpty) {
+      _displayName = savedName;
+      _nearby.setDisplayName(_displayName);
+      return;
+    }
+
+    // 名前が未設定 → ダイアログを表示
+    if (!mounted) return;
+    _showNameInputDialog();
+  }
+
+  /// 初回起動時に表示する名前入力ダイアログ。
+  /// 入力された名前は SharedPreferences に保存され、次回起動時に自動復元される。
+  Future<void> _showNameInputDialog() async {
+    final controller = TextEditingController();
+
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false, // ダイアログ外タップでは閉じない
+      builder: (ctx) => AlertDialog(
+        title: const Text("ニックネームを設定"),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 16,
+          decoration: const InputDecoration(
+            hintText: "あなたの名前を入力してください",
+            counterText: "",
+          ),
+          onSubmitted: (value) => Navigator.of(ctx).pop(value),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () {
+              final name = controller.text.trim();
+              if (name.isNotEmpty) {
+                Navigator.of(ctx).pop(name);
+              }
+            },
+            child: const Text("決定"),
+          ),
+        ],
+      ),
+    );
+
+    controller.dispose();
+
+    if (result != null && result.isNotEmpty) {
+      _displayName = result;
+      _nearby.setDisplayName(_displayName);
+
+      // SharedPreferences に保存（次回起動時に自動復元）
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('displayName', _displayName);
+    }
   }
 
   // ---- 権限 ----
