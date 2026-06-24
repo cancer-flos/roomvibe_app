@@ -379,6 +379,24 @@ class NearbyService {
           'time': time,
         });
         onChatMessagesUpdated?.call();
+
+        // ★★★ ホスト中継ロジズム ★★★
+        // 自分がホスト (isHost == true) の場合のみ、
+        // 受信したメッセージを自分以外の全ゲストに転送する。
+        //
+        // 送信元を除外する理由 (エコーバック防止):
+        // ゲスト1→ホスト→ゲスト2 の経路は正しいが、
+        // ゲスト1→ホスト→ゲスト1 のように送信元に戻すと
+        // ゲスト1側でメッセージが二重表示される。
+        // そこで _connectedEndpointIds から endpointId を除外してから
+        // ブロードキャストすることで、エコーバックを防止する。
+        if (isHost && payload.bytes != null) {
+          for (final eid in _connectedEndpointIds) {
+            if (eid != endpointId) {
+              Nearby().sendBytesPayload(eid, payload.bytes!);
+            }
+          }
+        }
       } catch (e) {
         debugPrint("メッセージデコードエラー: $e");
       }
