@@ -93,23 +93,26 @@ class NearbyService {
 
   // ---------- VIP名簿の永続化 ----------
 
-  /// SharedPreferences からVIP名簿を読み込み、_knownDeviceNames に復元する。
+  /// SharedPreferencesAsync からVIP名簿を読み込み、_knownDeviceNames に復元する。
+  ///
+  /// SharedPreferencesAsync は SharedPreferences と違い、
+  /// getInstance() のような非同期ファクトリが不要で、直接インスタンス化できる。
   /// 初回のみ実行される（_vipNamesLoaded でガード）。
   Future<void> _loadVipNames() async {
     if (_vipNamesLoaded) return;
     _vipNamesLoaded = true;
 
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getStringList(_vipPrefKey);
+    final prefs = SharedPreferencesAsync();
+    final saved = await prefs.getStringList(_vipPrefKey);
     if (saved != null) {
       _knownDeviceNames.addAll(saved);
     }
   }
 
-  /// _knownDeviceNames の内容を SharedPreferences に保存する。
+  /// _knownDeviceNames の内容を SharedPreferencesAsync に保存する。
   /// Set → List に変換してから書き込む。
   Future<void> _saveVipNames() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = SharedPreferencesAsync();
     await prefs.setStringList(_vipPrefKey, _knownDeviceNames.toList());
   }
 
