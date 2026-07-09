@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:roomvibe_app/services/nearby_service.dart';
 
 /// チャットルーム画面。
@@ -20,6 +21,9 @@ class _ChatPageState extends State<ChatPage> {
 
   /// 送信ボタンの有効/無効を管理する
   bool _canSend = false;
+
+  /// ImagePicker のインスタンス（使い回し）
+  final ImagePicker _picker = ImagePicker();
 
   @override
   void initState() {
@@ -55,6 +59,32 @@ class _ChatPageState extends State<ChatPage> {
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// ギャラリーから画像を選択する
+  ///
+  /// 選択された画像のパスをデバッグコンソールに出力する。
+  /// ユーザーがキャンセルした場合は何もしない。
+  /// 画像の送信処理は次のステップで実装する。
+  Future<void> _pickAndSendImage() async {
+    try {
+      final XFile? pickedFile = await _picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1920, // 大きすぎる画像を抑制
+        maxHeight: 1920,
+        imageQuality: 85,
+      );
+
+      if (pickedFile == null) {
+        // ユーザーがキャンセルした → 何もしない
+        return;
+      }
+
+      // 画像のパスをデバッグコンソールに出力（送信は次のステップ）
+      debugPrint("選択された画像のパス: ${pickedFile.path}");
+    } catch (e) {
+      debugPrint("画像選択エラー: $e");
+    }
   }
 
   /// メッセージを送信する
@@ -148,7 +178,16 @@ class _ChatPageState extends State<ChatPage> {
                         onSubmitted: (_) => _sendMessage(),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    // --- 画像選択ボタン ---
+                    IconButton(
+                      onPressed: _pickAndSendImage,
+                      icon: Icon(
+                        Icons.photo,
+                        color: Colors.indigo[300],
+                      ),
+                      tooltip: "画像を選択",
+                    ),
+                    const SizedBox(width: 4),
                     IconButton(
                       onPressed: _canSend ? _sendMessage : null,
                       icon: Icon(

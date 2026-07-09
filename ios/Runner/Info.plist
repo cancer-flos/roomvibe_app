@@ -45,5 +45,7 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>RoomVibeがチャットで画像を送信するために写真ライブラリへのアクセスが必要です</string>
 </dict>
 </plist>
