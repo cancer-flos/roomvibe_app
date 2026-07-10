@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -43,6 +44,11 @@ class NearbyService {
   /// エンドポイントID → 表示名 のマッピング
   /// onConnectionInitiated で名前を保存し、切断時に参照する
   final Map<String, String> _endpointNames = {};
+
+  /// 受信中のファイルペイロードを一時的に記録するマップ。
+  /// key: payload.id, value: payload.uri（ファイルの一時保存先URI）
+  /// onPayloadReceived(FILE) でセットし、onPayloadTransferUpdate(SUCCESS) で参照・削除する。
+  final Map<int, String> _incomingFiles = {};
 
   /// 過去に接続が成功した相手の表示名の集合。
   ///
@@ -192,8 +198,8 @@ class NearbyService {
       endpointId,
       onPayLoadRecieved: (id, payload) =>
           _handlePayloadReceived(id, payload),
-      onPayloadTransferUpdate: (id, update) =>
-          onPayloadTransferUpdate?.call(id, update),
+      onPayloadTransferUpdate: (eid, update) =>
+          _handlePayloadTransferUpdate(eid, update),
     );
   }
 
@@ -212,6 +218,30 @@ class NearbyService {
   Future<void> stopAllEndpoints() async {
     _connectedEndpointIds.clear();
     await Nearby().stopAllEndpoints();
+  }
+
+  /// 画像ファイルを接続中の全端末に送信する
+  ///
+  /// 1. 指定された filePath の画像ファイルを sendFilePayload で各端末に送信
+  /// 2. 自分自身には届かないため、ローカルエコーとして chatMessages に追加
+  Future<void> sendImagePayload(String filePath) async {
+    if (_myDisplayName == null) return;
+    if (_connectedEndpointIds.isEmpty) return;
+
+    final now = _formatTime(DateTime.now());
+
+    for (final endpointId in _connectedEndpointIds) {
+      Nearby().sendFilePayload(endpointId, filePath);
+    }
+
+    chatMessages.add({
+      'type': 'image',
+      'sender': _myDisplayName!,
+      'filePath': filePath,
+      'time': now,
+      'isMe': 'true',
+    });
+    onChatMessagesUpdated?.call();
   }
 
   /// メッセージを接続中の全端末に送信する
@@ -261,7 +291,7 @@ class NearbyService {
         onPayLoadRecieved: (eid, payload) =>
             _handlePayloadReceived(eid, payload),
         onPayloadTransferUpdate: (eid, update) =>
-            onPayloadTransferUpdate?.call(eid, update),
+            _handlePayloadTransferUpdate(eid, update),
       );
       return;
     }
@@ -289,7 +319,7 @@ class NearbyService {
               onPayLoadRecieved: (eid, payload) =>
                   _handlePayloadReceived(eid, payload),
               onPayloadTransferUpdate: (eid, update) =>
-                  onPayloadTransferUpdate?.call(eid, update),
+                  _handlePayloadTransferUpdate(eid, update),
             );
           }
         },
@@ -368,6 +398,14 @@ class NearbyService {
 
   /// ペイロード受信を処理する
   void _handlePayloadReceived(String endpointId, Payload payload) {
+    if (payload.type == PayloadType.FILE) {
+      // ファイルペイロード：URIを記録するが、まだ転送完了前なのでチャットには追加しない
+      final uri = payload.uri;
+      if (uri != null) {
+        _incomingFiles[payload.id] = uri;
+      }
+    }
+
     if (payload.type == PayloadType.BYTES && payload.bytes != null) {
       try {
         final jsonStr = utf8.decode(payload.bytes!);
@@ -406,6 +444,62 @@ class NearbyService {
     }
 
     onPayloadReceived?.call(endpointId, payload);
+  }
+
+  /// ペイロード転送の進捗更新を処理する
+  ///
+  /// ファイル転送が SUCCESS になった時点で、一時記録していた URI から
+  /// 画像ファイルをアプリ専用のキャッシュディレクトリにコピーし、
+  /// chatMessages に追加する。
+  void _handlePayloadTransferUpdate(
+      String endpointId, PayloadTransferUpdate update) {
+    if (update.status == PayloadStatus.SUCCESS &&
+        _incomingFiles.containsKey(update.id)) {
+      final uriStr = _incomingFiles.remove(update.id)!;
+      _processReceivedFile(uriStr);
+    }
+
+    onPayloadTransferUpdate?.call(endpointId, update);
+  }
+
+  /// 受信したファイルURIをアプリ内の永続的なパスにコピーし、
+  /// chatMessages に画像メッセージとして追加する。
+  ///
+  /// Android では content:// URI が渡されるため、`File(uri).copy()` は使えない。
+  /// nearby_connections パッケージが提供する `copyFileAndDeleteOriginal` を利用し、
+  /// ネイティブ（Android の ContentResolver）経由で正しくコピーする。
+  Future<void> _processReceivedFile(String uriStr) async {
+    try {
+      final dir = Directory.systemTemp;
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final destPath = '${dir.path}/roomvibe_img_$timestamp.jpg';
+
+      // Nearby().copyFileAndDeleteOriginal は Platform Channel を経由して
+      // Android ネイティブの ContentResolver で content:// URI を解決する。
+      // これにより file:// 以外のスキーマでも正しくファイルをコピーできる。
+      final ok = await Nearby().copyFileAndDeleteOriginal(uriStr, destPath);
+
+      if (ok != true) {
+        return;
+      }
+
+      final destFile = File(destPath);
+      if (!destFile.existsSync()) {
+        return;
+      }
+
+      final now = _formatTime(DateTime.now());
+
+      chatMessages.add({
+        'type': 'image',
+        'sender': _myDisplayName ?? '不明',
+        'filePath': destFile.path,
+        'time': now,
+      });
+      onChatMessagesUpdated?.call();
+    } catch (_) {
+      // ファイルコピー失敗時は何もせずスルー
+    }
   }
 
   // ---------- ヘルパー ----------

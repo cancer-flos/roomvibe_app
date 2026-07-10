@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:roomvibe_app/services/nearby_service.dart';
@@ -80,8 +82,8 @@ class _ChatPageState extends State<ChatPage> {
         return;
       }
 
-      // 画像のパスをデバッグコンソールに出力（送信は次のステップ）
-      debugPrint("選択された画像のパス: ${pickedFile.path}");
+      // 画像ファイルを接続中の全端末に送信する
+      await widget.nearby.sendImagePayload(pickedFile.path);
     } catch (e) {
       debugPrint("画像選択エラー: $e");
     }
@@ -127,16 +129,24 @@ class _ChatPageState extends State<ChatPage> {
 
                       // type フィールドで分岐：
                       // 'system' → システム通知（中央揃えグレーテキスト）
+                      // 'image'  → 画像メッセージ（吹き出し内に画像表示）
                       // それ以外 → 通常のチャット吹き出し
                       if (type == 'system') {
                         return _SystemMessage(text: text, time: time);
                       }
 
-                      final sender = msg['sender'] ?? '不明';
-                      // isMe フラグで自分のメッセージを判定する（名前比較ではない）
-                      // 送信元で isMe='true' がセットされており、
-                      // 受信したメッセージには isMe キーが存在しない（=null）ため false になる
                       final isMe = msg['isMe'] == 'true';
+
+                      if (type == 'image') {
+                        final filePath = msg['filePath'] ?? '';
+                        return _ImageBubble(
+                          filePath: filePath,
+                          time: time,
+                          isMe: isMe,
+                        );
+                      }
+
+                      final sender = msg['sender'] ?? '不明';
 
                       return _MessageBubble(
                         sender: sender,
@@ -255,6 +265,100 @@ class _SystemMessage extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 画像メッセージの吹き出しウィジェット
+///
+/// isMe == true  → 右寄せ（自分のメッセージ）
+/// isMe == false → 左寄せ（相手のメッセージ）
+/// Image.file で画像を表示し、最大幅 240px の制限と角丸を適用する。
+class _ImageBubble extends StatelessWidget {
+  final String filePath;
+  final String time;
+  final bool isMe;
+
+  const _ImageBubble({
+    required this.filePath,
+    required this.time,
+    required this.isMe,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment:
+            isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          // 吹き出し本体
+          Row(
+            mainAxisAlignment:
+                isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+            children: [
+              if (!isMe) const SizedBox(width: 8),
+              Flexible(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: isMe ? Colors.indigo[100] : Colors.grey[200],
+                    borderRadius: BorderRadius.only(
+                      topLeft: const Radius.circular(16),
+                      topRight: const Radius.circular(16),
+                      bottomLeft: isMe
+                          ? const Radius.circular(16)
+                          : const Radius.circular(4),
+                      bottomRight: isMe
+                          ? const Radius.circular(4)
+                          : const Radius.circular(16),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: isMe
+                        ? CrossAxisAlignment.end
+                        : CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: const BorderRadius.only(
+                          topLeft: Radius.circular(16),
+                          topRight: Radius.circular(16),
+                        ),
+                        child: Image.file(
+                          File(filePath),
+                          width: 240,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            width: 240,
+                            height: 120,
+                            color: Colors.grey[300],
+                            child: const Center(
+                              child: Icon(Icons.broken_image,
+                                  color: Colors.grey),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(
+                            left: 10, right: 10, top: 4, bottom: 6),
+                        child: Text(
+                          time,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (isMe) const SizedBox(width: 8),
+            ],
+          ),
+        ],
       ),
     );
   }
