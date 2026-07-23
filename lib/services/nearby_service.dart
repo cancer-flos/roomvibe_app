@@ -50,6 +50,9 @@ class NearbyService {
   /// onPayloadReceived(FILE) でセットし、onPayloadTransferUpdate(SUCCESS) で参照・削除する。
   final Map<int, String> _incomingFiles = {};
 
+  /// ファイル転送中（送受信問わず）であることをUIに通知するためのValueNotifier。
+  final ValueNotifier<bool> isTransferring = ValueNotifier(false);
+
   /// 過去に接続が成功した相手の表示名の集合。
   ///
   /// この内容は SharedPreferences に永続化されており、
@@ -228,6 +231,8 @@ class NearbyService {
     if (_myDisplayName == null) return;
     if (_connectedEndpointIds.isEmpty) return;
 
+    isTransferring.value = true;
+
     final now = _formatTime(DateTime.now());
 
     for (final endpointId in _connectedEndpointIds) {
@@ -403,6 +408,7 @@ class NearbyService {
       final uri = payload.uri;
       if (uri != null) {
         _incomingFiles[payload.id] = uri;
+        isTransferring.value = true;
       }
     }
 
@@ -457,6 +463,14 @@ class NearbyService {
         _incomingFiles.containsKey(update.id)) {
       final uriStr = _incomingFiles.remove(update.id)!;
       _processReceivedFile(uriStr);
+    }
+
+    if (update.status == PayloadStatus.SUCCESS ||
+        update.status == PayloadStatus.FAILURE ||
+        update.status == PayloadStatus.CANCELED) {
+      Future.delayed(const Duration(milliseconds: 500), () {
+        isTransferring.value = false;
+      });
     }
 
     onPayloadTransferUpdate?.call(endpointId, update);

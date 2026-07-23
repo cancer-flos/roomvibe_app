@@ -102,114 +102,151 @@ class _ChatPageState extends State<ChatPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text("チャット")),
-      body: Column(
+      body: Stack(
         children: [
-          // --- メッセージ一覧 ---
-          Expanded(
-            child: widget.nearby.chatMessages.isEmpty
-                ? const Center(
-                    child: Text(
-                      "まだメッセージはありません\n\n"
-                      "下部のテキストフィールドから\n"
-                      "メッセージを送信してみましょう",
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _scrollController,
-                    reverse: false,
-                    padding: const EdgeInsets.all(12),
-                    itemCount: widget.nearby.chatMessages.length,
-                    itemBuilder: (_, i) {
-                      final msg = widget.nearby.chatMessages[i];
-                      final type = msg['type'] ?? 'message';
-                      final text = msg['text'] ?? '';
-                      final time = msg['time'] ?? '';
-
-                      // type フィールドで分岐：
-                      // 'system' → システム通知（中央揃えグレーテキスト）
-                      // 'image'  → 画像メッセージ（吹き出し内に画像表示）
-                      // それ以外 → 通常のチャット吹き出し
-                      if (type == 'system') {
-                        return _SystemMessage(text: text, time: time);
-                      }
-
-                      final isMe = msg['isMe'] == 'true';
-
-                      if (type == 'image') {
-                        final filePath = msg['filePath'] ?? '';
-                        return _ImageBubble(
-                          filePath: filePath,
-                          time: time,
-                          isMe: isMe,
-                        );
-                      }
-
-                      final sender = msg['sender'] ?? '不明';
-
-                      return _MessageBubble(
-                        sender: sender,
-                        text: text,
-                        time: time,
-                        isMe: isMe,
-                      );
-                    },
-                  ),
-          ),
-
-          // --- テキスト入力エリア ---
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              boxShadow: [
-                BoxShadow(
-                  offset: const Offset(0, -2),
-                  blurRadius: 4,
-                  color: Colors.black.withOpacity(0.1),
-                ),
-              ],
-            ),
-            child: SafeArea(
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _textController,
-                        decoration: const InputDecoration(
-                          hintText: "メッセージを入力...",
-                          border: OutlineInputBorder(),
-                          contentPadding: EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 10),
+          // --- 通常のチャットUI ---
+          Column(
+            children: [
+              // --- メッセージ一覧 ---
+              Expanded(
+                child: widget.nearby.chatMessages.isEmpty
+                    ? const Center(
+                        child: Text(
+                          "まだメッセージはありません\n\n"
+                          "下部のテキストフィールドから\n"
+                          "メッセージを送信してみましょう",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.grey),
                         ),
-                        onSubmitted: (_) => _sendMessage(),
+                      )
+                    : ListView.builder(
+                        controller: _scrollController,
+                        reverse: false,
+                        padding: const EdgeInsets.all(12),
+                        itemCount: widget.nearby.chatMessages.length,
+                        itemBuilder: (_, i) {
+                          final msg = widget.nearby.chatMessages[i];
+                          final type = msg['type'] ?? 'message';
+                          final text = msg['text'] ?? '';
+                          final time = msg['time'] ?? '';
+
+                          // type フィールドで分岐：
+                          // 'system' → システム通知（中央揃えグレーテキスト）
+                          // 'image'  → 画像メッセージ（吹き出し内に画像表示）
+                          // それ以外 → 通常のチャット吹き出し
+                          if (type == 'system') {
+                            return _SystemMessage(text: text, time: time);
+                          }
+
+                          final isMe = msg['isMe'] == 'true';
+
+                          if (type == 'image') {
+                            final filePath = msg['filePath'] ?? '';
+                            return _ImageBubble(
+                              filePath: filePath,
+                              time: time,
+                              isMe: isMe,
+                            );
+                          }
+
+                          final sender = msg['sender'] ?? '不明';
+
+                          return _MessageBubble(
+                            sender: sender,
+                            text: text,
+                            time: time,
+                            isMe: isMe,
+                          );
+                        },
                       ),
-                    ),
-                    // --- 画像選択ボタン ---
-                    IconButton(
-                      onPressed: _pickAndSendImage,
-                      icon: Icon(
-                        Icons.photo,
-                        color: Colors.indigo[300],
-                      ),
-                      tooltip: "画像を選択",
-                    ),
-                    const SizedBox(width: 4),
-                    IconButton(
-                      onPressed: _canSend ? _sendMessage : null,
-                      icon: Icon(
-                        Icons.send,
-                        color: _canSend ? Colors.indigo : Colors.grey[400],
-                      ),
-                      tooltip: "送信",
+              ),
+
+              // --- テキスト入力エリア ---
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  boxShadow: [
+                    BoxShadow(
+                      offset: const Offset(0, -2),
+                      blurRadius: 4,
+                      color: Colors.black.withOpacity(0.1),
                     ),
                   ],
                 ),
+                child: SafeArea(
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _textController,
+                            decoration: const InputDecoration(
+                              hintText: "メッセージを入力...",
+                              border: OutlineInputBorder(),
+                              contentPadding: EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 10),
+                            ),
+                            onSubmitted: (_) => _sendMessage(),
+                          ),
+                        ),
+                        // --- 画像選択ボタン ---
+                        IconButton(
+                          onPressed: _pickAndSendImage,
+                          icon: Icon(
+                            Icons.photo,
+                            color: Colors.indigo[300],
+                          ),
+                          tooltip: "画像を選択",
+                        ),
+                        const SizedBox(width: 4),
+                        IconButton(
+                          onPressed: _canSend ? _sendMessage : null,
+                          icon: Icon(
+                            Icons.send,
+                            color: _canSend ? Colors.indigo : Colors.grey[400],
+                          ),
+                          tooltip: "送信",
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
-            ),
+            ],
+          ),
+
+          // --- ファイル転送中オーバーレイ ---
+          ValueListenableBuilder<bool>(
+            valueListenable: widget.nearby.isTransferring,
+            builder: (context, isTransferring, child) {
+              if (!isTransferring) return const SizedBox.shrink();
+
+              return Container(
+                color: Colors.black54,
+                child: const Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(
+                        color: Colors.white,
+                      ),
+                      SizedBox(height: 24),
+                      Text(
+                        "ファイル転送中...\nアプリを閉じないでください",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
           ),
         ],
       ),
