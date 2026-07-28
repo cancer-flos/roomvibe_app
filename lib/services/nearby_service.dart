@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -50,8 +51,19 @@ class NearbyService {
   /// onPayloadReceived(FILE) でセットし、onPayloadTransferUpdate(SUCCESS) で参照・削除する。
   final Map<int, String> _incomingFiles = {};
 
+  /// ファイルペイロードID → 元のファイル名 を保持するマップ。
+  /// Sender が Bytes で事前送信したメタデータを保持し、受信完了時に拡張子決定に使う。
+  final Map<int, String> _incomingFileNames = {};
+
+  /// メタデータ到着待ちのFIFOキュー。
+  /// Sender がファイル本体より先に送信したファイル名を順に保持する。
+  final Queue<String> _pendingFileNames = Queue<String>();
+
   /// ファイル転送中（送受信問わず）であることをUIに通知するためのValueNotifier。
   final ValueNotifier<bool> isTransferring = ValueNotifier(false);
+
+  /// ファイル転送の進捗（0.0〜1.0）を保持するValueNotifier。
+  final ValueNotifier<double> transferProgress = ValueNotifier(0.0);
 
   /// 過去に接続が成功した相手の表示名の集合。
   ///
@@ -223,30 +235,46 @@ class NearbyService {
     await Nearby().stopAllEndpoints();
   }
 
-  /// 画像ファイルを接続中の全端末に送信する
+  /// 任意のファイルを接続中の全端末に送信する
   ///
-  /// 1. 指定された filePath の画像ファイルを sendFilePayload で各端末に送信
+  /// 1. 指定された filePath のファイルを sendFilePayload で各端末に送信
   /// 2. 自分自身には届かないため、ローカルエコーとして chatMessages に追加
-  Future<void> sendImagePayload(String filePath) async {
+  /// 3. [type] には 'image' / 'file' / 'video' などを指定する
+  Future<void> sendFilePayload(String filePath, {String type = 'file'}) async {
     if (_myDisplayName == null) return;
     if (_connectedEndpointIds.isEmpty) return;
 
     isTransferring.value = true;
+    transferProgress.value = 0.0;
 
     final now = _formatTime(DateTime.now());
+    final fileName = filePath.split('/').last;
 
     for (final endpointId in _connectedEndpointIds) {
+      // ファイル本体より先にメタデータ（ファイル名）をBytesで送信
+      final metaStr = "FILE_META:$fileName";
+      final metaBytes = Uint8List.fromList(utf8.encode(metaStr));
+      Nearby().sendBytesPayload(endpointId, metaBytes);
+      // ファイルペイロードを送信
       Nearby().sendFilePayload(endpointId, filePath);
     }
 
     chatMessages.add({
-      'type': 'image',
+      'type': type,
       'sender': _myDisplayName!,
       'filePath': filePath,
       'time': now,
       'isMe': 'true',
+      'fileName': fileName,
     });
     onChatMessagesUpdated?.call();
+  }
+
+  /// 画像ファイルを接続中の全端末に送信する（sendFilePayload への委譲）
+  ///
+  /// 既存の呼び出し元との互換性のために残す。
+  Future<void> sendImagePayload(String filePath) async {
+    await sendFilePayload(filePath, type: 'image');
   }
 
   /// メッセージを接続中の全端末に送信する
@@ -404,17 +432,33 @@ class NearbyService {
   /// ペイロード受信を処理する
   void _handlePayloadReceived(String endpointId, Payload payload) {
     if (payload.type == PayloadType.FILE) {
-      // ファイルペイロード：URIを記録するが、まだ転送完了前なのでチャットには追加しない
+      // ファイルペイロード：URIを記録し、キューからファイル名を取り出して紐付ける
       final uri = payload.uri;
       if (uri != null) {
         _incomingFiles[payload.id] = uri;
+        // 先に到着しているメタデータをキューから取り出して紐付け
+        final fileName = _pendingFileNames.isNotEmpty
+            ? _pendingFileNames.removeFirst()
+            : 'unknown.bin';
+        _incomingFileNames[payload.id] = fileName;
         isTransferring.value = true;
       }
     }
 
     if (payload.type == PayloadType.BYTES && payload.bytes != null) {
+      final rawStr = utf8.decode(payload.bytes!);
+
+      // ファイルメタデータ（FILE_META:<fileName>）の解析
+      if (rawStr.startsWith("FILE_META:")) {
+        final fileName = rawStr.substring("FILE_META:".length);
+        if (fileName.isNotEmpty) {
+          _pendingFileNames.add(fileName);
+        }
+        return;
+      }
+
       try {
-        final jsonStr = utf8.decode(payload.bytes!);
+        final jsonStr = rawStr;
         final data = jsonDecode(jsonStr) as Map<String, dynamic>;
         final sender = data['sender'] as String? ?? '不明';
         final text = data['text'] as String? ?? '';
@@ -459,34 +503,67 @@ class NearbyService {
   /// chatMessages に追加する。
   void _handlePayloadTransferUpdate(
       String endpointId, PayloadTransferUpdate update) {
-    if (update.status == PayloadStatus.SUCCESS &&
-        _incomingFiles.containsKey(update.id)) {
-      final uriStr = _incomingFiles.remove(update.id)!;
-      _processReceivedFile(uriStr);
+    if (update.status == PayloadStatus.SUCCESS) {
+      () async {
+        try {
+          if (_incomingFiles.containsKey(update.id)) {
+            final uriStr = _incomingFiles.remove(update.id)!;
+            await _processReceivedFile(uriStr, payloadId: update.id);
+          }
+        } catch (e) {
+          debugPrint("Sender側バイパス、またはファイル処理エラー: $e");
+        } finally {
+          isTransferring.value = false;
+          transferProgress.value = 0.0;
+        }
+      }();
+      return;
     }
 
-    if (update.status == PayloadStatus.SUCCESS ||
-        update.status == PayloadStatus.FAILURE ||
+    if (update.status == PayloadStatus.IN_PROGRESS && update.totalBytes > 0) {
+      transferProgress.value =
+          update.bytesTransferred / update.totalBytes;
+    }
+
+    if (update.status == PayloadStatus.FAILURE ||
         update.status == PayloadStatus.CANCELED) {
-      Future.delayed(const Duration(milliseconds: 500), () {
-        isTransferring.value = false;
-      });
+      transferProgress.value = 0.0;
+      isTransferring.value = false;
     }
 
     onPayloadTransferUpdate?.call(endpointId, update);
   }
 
   /// 受信したファイルURIをアプリ内の永続的なパスにコピーし、
-  /// chatMessages に画像メッセージとして追加する。
+  /// chatMessages にファイルメッセージとして追加する。
   ///
   /// Android では content:// URI が渡されるため、`File(uri).copy()` は使えない。
   /// nearby_connections パッケージが提供する `copyFileAndDeleteOriginal` を利用し、
   /// ネイティブ（Android の ContentResolver）経由で正しくコピーする。
-  Future<void> _processReceivedFile(String uriStr) async {
+  Future<void> _processReceivedFile(String uriStr, {required int payloadId}) async {
     try {
       final dir = Directory.systemTemp;
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final destPath = '${dir.path}/roomvibe_img_$timestamp.jpg';
+
+      // メタデータからファイル名を取得できればその拡張子を使う
+      String ext;
+      String baseName;
+      if (_incomingFileNames.containsKey(payloadId)) {
+        final originalName = _incomingFileNames.remove(payloadId)!;
+        final dotIndex = originalName.lastIndexOf('.');
+        if (dotIndex != -1 && dotIndex < originalName.length - 1) {
+          ext = originalName.substring(dotIndex).toLowerCase();
+          baseName = originalName.substring(0, dotIndex);
+        } else {
+          ext = '.bin';
+          baseName = originalName;
+        }
+      } else {
+        // メタデータがない場合はURIから拡張子を推測
+        ext = _guessExtension(uriStr);
+        baseName = 'roomvibe_file_$timestamp';
+      }
+      final destPath = '${dir.path}/${baseName}_$timestamp$ext';
 
       // Nearby().copyFileAndDeleteOriginal は Platform Channel を経由して
       // Android ネイティブの ContentResolver で content:// URI を解決する。
@@ -503,17 +580,34 @@ class NearbyService {
       }
 
       final now = _formatTime(DateTime.now());
+      final fileName = destFile.path.split('/').last;
 
+      // 拡張子が画像系なら type='image'、それ以外は type='file'
+      final isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+          .contains(ext.toLowerCase());
       chatMessages.add({
-        'type': 'image',
+        'type': isImage ? 'image' : 'file',
         'sender': _myDisplayName ?? '不明',
         'filePath': destFile.path,
         'time': now,
+        'fileName': fileName,
       });
       onChatMessagesUpdated?.call();
     } catch (_) {
       // ファイルコピー失敗時は何もせずスルー
     }
+  }
+
+  /// URI文字列から拡張子を推測する。
+  /// `._` で終わる場合や拡張子不明の場合は `.bin` を返す。
+  String _guessExtension(String uriStr) {
+    // クエリパラメータを除去
+    final path = uriStr.split('?').first;
+    final dotIndex = path.lastIndexOf('.');
+    if (dotIndex == -1 || dotIndex == path.length - 1) return '.bin';
+    final ext = path.substring(dotIndex).toLowerCase();
+    if (ext.contains('/') || ext.contains(' ')) return '.bin';
+    return ext;
   }
 
   // ---------- ヘルパー ----------

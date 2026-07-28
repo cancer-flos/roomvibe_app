@@ -1,7 +1,9 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:roomvibe_app/services/nearby_service.dart';
 
 /// チャットルーム画面。
@@ -64,28 +66,43 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   /// ギャラリーから画像を選択する
-  ///
-  /// 選択された画像のパスをデバッグコンソールに出力する。
-  /// ユーザーがキャンセルした場合は何もしない。
-  /// 画像の送信処理は次のステップで実装する。
   Future<void> _pickAndSendImage() async {
     try {
       final XFile? pickedFile = await _picker.pickImage(
         source: ImageSource.gallery,
-        maxWidth: 1920, // 大きすぎる画像を抑制
+        maxWidth: 1920,
         maxHeight: 1920,
         imageQuality: 85,
       );
 
-      if (pickedFile == null) {
-        // ユーザーがキャンセルした → 何もしない
-        return;
-      }
+      if (pickedFile == null) return;
 
-      // 画像ファイルを接続中の全端末に送信する
       await widget.nearby.sendImagePayload(pickedFile.path);
     } catch (e) {
       debugPrint("画像選択エラー: $e");
+    }
+  }
+
+  /// file_picker で任意のファイルを選択して送信する
+  Future<void> _pickAndSendFile() async {
+    try {
+      final result = await FilePicker.platform.pickFiles();
+
+      if (result == null || result.files.isEmpty) return;
+
+      final filePath = result.files.single.path;
+      if (filePath == null) return;
+
+      // 拡張子が画像系なら image、それ以外は file として送信
+      final ext = filePath.split('.').last.toLowerCase();
+      final isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp']
+          .contains(ext);
+      await widget.nearby.sendFilePayload(
+        filePath,
+        type: isImage ? 'image' : 'file',
+      );
+    } catch (e) {
+      debugPrint("ファイル選択エラー: $e");
     }
   }
 
@@ -130,20 +147,26 @@ class _ChatPageState extends State<ChatPage> {
                           final text = msg['text'] ?? '';
                           final time = msg['time'] ?? '';
 
-                          // type フィールドで分岐：
-                          // 'system' → システム通知（中央揃えグレーテキスト）
-                          // 'image'  → 画像メッセージ（吹き出し内に画像表示）
-                          // それ以外 → 通常のチャット吹き出し
                           if (type == 'system') {
                             return _SystemMessage(text: text, time: time);
                           }
 
                           final isMe = msg['isMe'] == 'true';
+                          final filePath = msg['filePath'] ?? '';
 
                           if (type == 'image') {
-                            final filePath = msg['filePath'] ?? '';
                             return _ImageBubble(
                               filePath: filePath,
+                              time: time,
+                              isMe: isMe,
+                            );
+                          }
+
+                          if (type == 'file') {
+                            final fileName = msg['fileName'] ?? 'ファイル';
+                            return _FileBubble(
+                              filePath: filePath,
+                              fileName: fileName,
                               time: time,
                               isMe: isMe,
                             );
@@ -191,6 +214,15 @@ class _ChatPageState extends State<ChatPage> {
                             onSubmitted: (_) => _sendMessage(),
                           ),
                         ),
+                        // --- ファイル選択ボタン ---
+                        IconButton(
+                          onPressed: _pickAndSendFile,
+                          icon: Icon(
+                            Icons.attach_file,
+                            color: Colors.indigo[300],
+                          ),
+                          tooltip: "ファイルを選択",
+                        ),
                         // --- 画像選択ボタン ---
                         IconButton(
                           onPressed: _pickAndSendImage,
@@ -217,34 +249,60 @@ class _ChatPageState extends State<ChatPage> {
             ],
           ),
 
-          // --- ファイル転送中オーバーレイ ---
+          // --- ファイル転送中オーバーレイ（進捗表示対応） ---
           ValueListenableBuilder<bool>(
             valueListenable: widget.nearby.isTransferring,
             builder: (context, isTransferring, child) {
               if (!isTransferring) return const SizedBox.shrink();
 
-              return Container(
-                color: Colors.black54,
-                child: const Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(
-                        color: Colors.white,
+              return ValueListenableBuilder<double>(
+                valueListenable: widget.nearby.transferProgress,
+                builder: (context, progress, child) {
+                  return Container(
+                    color: Colors.black54,
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 100,
+                            height: 100,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                CircularProgressIndicator(
+                                  value: progress > 0 ? progress : null,
+                                  color: Colors.white,
+                                  strokeWidth: 6,
+                                ),
+                                Text(
+                                  progress > 0
+                                      ? "${(progress * 100).toInt()}%"
+                                      : "",
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          const Text(
+                            "ファイル転送中...\nアプリを閉じないでください",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
                       ),
-                      SizedBox(height: 24),
-                      Text(
-                        "ファイル転送中...\nアプリを閉じないでください",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                    ),
+                  );
+                },
               );
             },
           ),
@@ -257,7 +315,6 @@ class _ChatPageState extends State<ChatPage> {
 /// システムメッセージ（入退室等）のウィジェット
 ///
 /// 中央寄せの控えめなグレーテキストで表示する。
-/// LINE の「〇〇さんが参加しました」のような演出。
 class _SystemMessage extends StatelessWidget {
   final String text;
   final String time;
@@ -311,7 +368,6 @@ class _SystemMessage extends StatelessWidget {
 ///
 /// isMe == true  → 右寄せ（自分のメッセージ）
 /// isMe == false → 左寄せ（相手のメッセージ）
-/// Image.file で画像を表示し、最大幅 240px の制限と角丸を適用する。
 class _ImageBubble extends StatelessWidget {
   final String filePath;
   final String time;
@@ -331,7 +387,6 @@ class _ImageBubble extends StatelessWidget {
         crossAxisAlignment:
             isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
-          // 吹き出し本体
           Row(
             mainAxisAlignment:
                 isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
@@ -401,6 +456,121 @@ class _ImageBubble extends StatelessWidget {
   }
 }
 
+/// 一般ファイルメッセージの吹き出しウィジェット
+///
+/// ファイルアイコン + ファイル名を表示するシンプルなUI。
+/// タップでOS標準のファイルビューアで開こうとする。
+class _FileBubble extends StatelessWidget {
+  final String filePath;
+  final String fileName;
+  final String time;
+  final bool isMe;
+
+  const _FileBubble({
+    required this.filePath,
+    required this.fileName,
+    required this.time,
+    required this.isMe,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment:
+            isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment:
+                isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+            children: [
+              if (!isMe) const SizedBox(width: 8),
+              Flexible(
+                child: GestureDetector(
+                  onTap: () async {
+                    // デバッグ: ファイルの存在確認とサイズ確認
+                    final file = File(filePath);
+                    debugPrint("ファイルパス: $filePath");
+                    debugPrint("ファイル存在: ${file.existsSync()}");
+                    if (file.existsSync()) {
+                      debugPrint("ファイルサイズ: ${file.lengthSync()} bytes");
+                    }
+                    try {
+                      final result = await OpenFilex.open(filePath);
+                      if (result.type != ResultType.done) {
+                        debugPrint("ファイルを開けませんでした: ${result.message}");
+                      }
+                    } catch (e) {
+                      debugPrint("ファイルオープンエラー: $e");
+                    }
+                  },
+                  child: Container(
+                    constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.7,
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: isMe ? Colors.indigo[100] : Colors.grey[200],
+                      borderRadius: BorderRadius.only(
+                        topLeft: const Radius.circular(16),
+                        topRight: const Radius.circular(16),
+                        bottomLeft: isMe
+                            ? const Radius.circular(16)
+                            : const Radius.circular(4),
+                        bottomRight: isMe
+                            ? const Radius.circular(4)
+                            : const Radius.circular(16),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.insert_drive_file,
+                          color: Colors.indigo[400],
+                          size: 32,
+                        ),
+                        const SizedBox(width: 10),
+                        Flexible(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                fileName,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.black87,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                time,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.grey[600],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              if (isMe) const SizedBox(width: 8),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// メッセージの吹き出しウィジェット
 ///
 /// isMe == true  → 右寄せ（自分のメッセージ、青色）
@@ -438,7 +608,6 @@ class _MessageBubble extends StatelessWidget {
                     color: Colors.indigo),
               ),
             ),
-          // 吹き出し本体
           Row(
             mainAxisAlignment:
                 isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
